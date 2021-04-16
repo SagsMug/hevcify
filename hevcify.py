@@ -408,6 +408,7 @@ def read_io(log, isdone):
 			time.sleep(0.1)
 
 		if isdone():
+			yield text[i:] #Return any remaining
 			break
 
 def run():
@@ -435,6 +436,7 @@ def run():
 				futures.append([log, in_file, executor.submit(doresult, in_file, log)])
 
 		#Order is not ensured, we need to find the running ones
+		#TODO: It was a bug, its actually linear, remove this
 		while (len(futures) > 0):
 			#TODO: Find a more efficient scheme
 			lookat = [i for i in futures if i[2].running() or i[2].done()]
