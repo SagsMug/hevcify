@@ -14,15 +14,8 @@ from concurrent.futures import ThreadPoolExecutor
 #TODO: Encapsulate things more (like AvgCounter is)
 #parallel echo {} {/} {/.} ::: dtest_com/*.mp4
 
-#Thank: https://stackoverflow.com/questions/12116685/how-can-i-require-my-python-scripts-argument-to-be-a-float-between-0-0-1-0-usin
-class Range(object):
-	def __init__(self, start, end):
-		self.start = start
-		self.end = end
-	def __eq__(self, other):
-		return self.start <= other <= self.end
-
 #Allowed video extensions
+#TODO: Allow selecting via argument
 videxts = (
 	".webm",
 	".mkv",
@@ -53,18 +46,45 @@ videxts = (
 	".gifv", #Im sorry little one, use apng instead
 )
 
-parser = argparse.ArgumentParser(prog="hevcify",description="Recursively convert a folder to HEVC/H.265")
-parser.add_argument("path", type=str, help="Input folder path")
-parser.add_argument("--tmp", type=str, default=tempfile.gettempdir(), help="Where to store temporary files")
-parser.add_argument("--size_reduction", type=float, default=0.2, choices=[Range(0.0,1.0)], help="The minimum percentage to save (0.2 for 20%% smaller)")
+#Thank: https://stackoverflow.com/a/59678681
+class Range(object):
+	def __init__(self, start, end):
+		self.start = start
+		self.end = end
+	def __eq__(self, other):
+		return self.start <= other <= self.end
+	def __contains__(self, item):
+		return self.__eq__(item)
+	def __iter__(self):
+		yield self
+	def __str__(self):
+		return '{0}..{1}'.format(self.start, self.end)
+
+#Thank: https://stackoverflow.com/a/11415816
+#TODO: Check write/read-ability
+class readable_dir(argparse.Action):
+	def __call__(self, parser, namespace, values, option_string=None):
+		prospective_dir=values
+		if not os.path.isdir(prospective_dir):
+			raise argparse.ArgumentTypeError("readable_dir:{0} is not a valid path".format(prospective_dir))
+		if os.access(prospective_dir, os.R_OK):
+			setattr(namespace,self.dest,prospective_dir)
+		else:
+			raise argparse.ArgumentTypeError("readable_dir:{0} is not a readable dir".format(prospective_dir))
+
+parser = argparse.ArgumentParser(prog="hevcify",description="Recursively convert a folder to HEVC/H.265",formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+parser.add_argument("path", type=str, action=readable_dir, help="Input folder path")
+parser.add_argument("--tmp", type=str, default=tempfile.gettempdir(), action=readable_dir, help="Where to store temporary files")
+parser.add_argument("--size_reduction", type=float, default=0.15, choices=Range(0.0,1.0), help="The minimum percentage to save (0.2 for 20%% smaller)")
 parser.add_argument("--delete", action="store_true", help="Delete original files")
-parser.add_argument("--iterations", type=int, default=60, choices=[Range(1,5*60)], help="Number of seconds to keep in the bitrate counter (1 per second)")
-parser.add_argument("--type", type=str, default="mp4", help="Filetype (mkv, mp4, etc.)")
+parser.add_argument("--iterations", type=int, default=60, choices=Range(1,5*60), help="Number of seconds to keep in the bitrate counter (1 per second)")
+parser.add_argument("--type", type=str, default="mp4", choices=[k[1:] for k in videxts], help="Filetype (mkv, mp4, etc.)")
 parser.add_argument("--same_type", action="store_true", help="Keep file extension given by --same_type_filter")
-parser.add_argument("--same_type_filter", type=str, default="mkv,mp4", help="File extensions to keep given --same_type")
+parser.add_argument("--same_type_filter", type=str, default="mkv,mp4,m4v,mov", help="File extensions to keep given --same_type")
 parser.add_argument("--repair", action="store_true", help="When finding invalid files, attempt to remux with ffmpeg to fix")
 parser.add_argument("--ignore_hevc", action="store_true", help="Ignore files already encoded in HEVC/H.265")
-parser.add_argument("--workers", type=int, default=1, choices=[Range(1,32)], help="Number of ffmpeg instances to run")
+parser.add_argument("--workers", type=int, default=1, choices=Range(1,32), help="Number of ffmpeg instances to run")
+parser.add_argument("--stop_at", type=float, default=0.45, choices=Range(0.0,1.0), help="Percentage number when to finish encoding")
 #TODO WONTFIX: If im ever gonna publish this, i should add AMD support
 #	I dont own an amd card thought, hopefully it has CRF
 #	hevc_amf apparently
@@ -76,18 +96,6 @@ parser.add_argument("--nvenc", action="store_true", help="Uses NVENC instead of 
 #TODO: Some ignore predicate, like ignore HEVC, but more general
 
 args = parser.parse_args()
-
-#TODO: move into argparse readable_dir
-#		https://stackoverflow.com/questions/11415570/directory-path-types-with-argparse
-if not os.path.isdir(args.path):
-	parser.error("path folder doesn't exist")
-
-if (not os.path.isdir(args.tmp)):
-	parser.error("--tmp folder doesn't exist")
-
-if not "." + args.type in videxts:
-	parser.error("--type is not recognized")
-#TODO: Check write/read-ability
 
 print(args)
 
@@ -201,7 +209,7 @@ def dowork(in_file, stdout):
 			if i["codec_type"] == "video" and (i["codec_name"].lower() == "hevc" or i["codec_name"].lower() == "h265"):
 				return None, None
 
-	stdout.write(">========================================\n")
+	stdout.write(">========================================>\n")
 
 	if not "bit_rate" in vid_data["format"] or not "duration" in vid_data["format"]:
 		if args.repair:
@@ -262,11 +270,12 @@ def dowork(in_file, stdout):
 		"-c:v","hevc_nvenc",
 		"-preset","p7", 
 		#Slowest possible, 
-		# also only available if compiled against NVIDIA Video Codec SDK 11
+		# also only available if compiled against NVIDIA Video Codec SDK 11 (or 10?)
 		"-rc","vbr",
 		"-rc-lookahead","32",
 		"-tune","hq",
 		"-b_ref_mode","each",
+		"-bf","5",
 		"-cq","25",
 		"-pix_fmt",pix_fmt, #Yeah this might become cpu limited, but thats on the FFMPEG team to fix
 		out_file
@@ -325,20 +334,28 @@ def dowork(in_file, stdout):
 			new_bitrate = int(new_kbits*1000)
 
 			current_length = toseconds(r.group(5).strip())
+			progress = None
 			if (current_length > 0):
 				progress = current_length/og_lenght
 				#BUG: If current line get smaller, it leaves artifacts
-				stdout.write("{} prog={:01.02f}% time={} bitrate={}kbits/s speed={}x\r".format(
-					getprogressbar(current_length,og_lenght, len=50),
+				out = " prog={:01.02f}% time={} bitrate={}kbits/s speed={}x\r".format(
 					progress*100,
 					r.group(5),
 					r.group(6),
 					r.group(7)
-				))
+				)
+				width = os.get_terminal_size().columns + 1 - len(out)
+				if (width < 2):
+					width = 2
+
+				out = "{}{}".format(getprogressbar(current_length,og_lenght, len=width), out)
+
+				stdout.write(out)
 
 			stdout.flush()
 
-			if (bits.add(new_bitrate)):
+			beyond_stop = progress != None and args.stop_at < progress
+			if (bits.add(new_bitrate) and not beyond_stop):
 				proc.terminate()
 				stdout.write("\n")
 				return False, out_file
@@ -408,7 +425,7 @@ def read_io(log, isdone):
 			time.sleep(0.1)
 
 		if isdone():
-			yield text[i:] #Return any remaining
+			yield text[i:] + "\n" #Return any remaining
 			break
 
 def run():
@@ -435,29 +452,22 @@ def run():
 				log = StringIO()
 				futures.append([log, in_file, executor.submit(doresult, in_file, log)])
 
-		#Order is not ensured, we need to find the running ones
-		#TODO: It was a bug, its actually linear, remove this
 		while (len(futures) > 0):
-			#TODO: Find a more efficient scheme
-			lookat = [i for i in futures if i[2].running() or i[2].done()]
+			current = futures[0]
 
-			for log, in_file, future in lookat:
-				for i in read_io(log, lambda: future.done()):
-					sys.stdout.write(i)
+			log, in_file, future = current
+			for i in read_io(log, lambda: future.done()):
+				sys.stdout.write(i)
 
-				try:
-					future.result()
-				except Exception as e:
-					print(e)
+			try:
+				future.result()
+			except Exception as e:
+				print(e)
 
-				wrk.add(in_file) #TODO: Detect ffmpeg failure
-				log.close()
+			wrk.add(in_file) #TODO: Detect ffmpeg failure
+			log.close()
 
-			for i in lookat:
-				futures.remove(i)
-			
-			#Speedcap
-			time.sleep(0.1)
+			futures.remove(current) #TODO: Too inefficient?
 
 	wrk.close()
 
